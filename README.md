@@ -4,6 +4,8 @@
 
 数据集下载、官方划分、校验方式和读取示例见 [DATASET.md](DATASET.md)。运行 `python scripts/dataset_status.py` 可查看准备进度。
 
+Long-Term Dependency 方法的统一预处理和复现代码见[下方说明](#long-term-dependency-复现)。
+
 ## 1. 核心任务定义
 
 给定按时间排序的二维超声图像序列，在推理时不使用外部跟踪器提供的逐帧探头位姿，从图像中恢复各帧的三维空间关系，将整段扫描重建到统一的三维坐标系中。
@@ -136,6 +138,28 @@ $$
 ## 8. 本目录后续工作的任务表述
 
 给定无逐帧定位信息的二维超声序列，估计其三维空间布局，并据此构建三维超声表示。通过空间位置误差评价几何准确性，通过图像指标补充评价灰度重建质量。训练可使用跟踪器真值监督，推理不使用逐帧真实位姿，并在独立受试者上验证泛化能力。
+
+## Long-Term Dependency 复现
+
+当前目录提供论文方法针对 TUS-REC2024 的可运行适配。预处理保持原始 HDF5 不变，只生成索引、4 倍下采样标定矩阵和配置：
+
+```bash
+python scripts/preprocess_longterm.py
+```
+
+训练设置与作者实现一致：输入连续 10 帧，采样范围为 10 帧，预测最后 9 帧相对前面帧的 45 个帧对变换；EfficientNet-B1 接收 10 通道灰度输入，输出每个帧对的 6-DoF 参数。监督将相对变换作用到四个图像角点，再在工具坐标系中计算点坐标 MSE。训练时使用跟踪器位姿作为监督，模型输入不包含位姿。
+
+```bash
+python train_longterm.py \
+  --root data/tus-rec2024 \
+  --preprocessed data/tus-rec2024/preprocessed/longterm \
+  --output runs/longterm \
+  --device cuda
+```
+
+默认训练 100 个 epoch、批大小 32、学习率 `1e-4`。没有 GPU 时可用 `--device cpu --max-steps 1 --epochs 1` 做流程检查；`--max-steps` 只限制每个 epoch 的训练步数，不代表论文结果。最佳验证模型保存在 `runs/longterm/best.pt`，训练历史保存在 `runs/longterm/history.json`。
+
+这是在 TUS-REC2024 上的统一复现版本：官方 2024 数据按受试者划分为 000–049 训练、050–052 验证，而论文原始实验使用作者发布的旧数据和交叉验证。因此，不能把本实验结果直接当作论文表格的数值；比较时应在同一 TUS-REC2024 划分上重新训练所有方法。
 
 ## 官方来源
 

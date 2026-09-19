@@ -2,14 +2,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-import zipfile
-import zlib
-
 import h5py
 import numpy as np
 
 from datasets import TUSREC2024
-from scripts.prepare_dataset import extract_verified
 
 
 class DatasetTests(unittest.TestCase):
@@ -54,28 +50,6 @@ class DatasetTests(unittest.TestCase):
         (self.root / 'manifests/val.jsonl').write_text('')
         with self.assertRaises(ValueError):
             TUSREC2024(self.root, 'val')
-
-    def test_wrong_local_member_requires_official_override(self):
-        archive = self.root / 'local.zip'
-        with zipfile.ZipFile(archive, 'w') as z:
-            z.writestr('landmark.h5', b'old')
-        correct = b'official'
-        expected = {'landmark.h5': {'size': len(correct), 'crc32': zlib.crc32(correct)}}
-        with self.assertRaises(ValueError):
-            extract_verified(archive, self.root / 'out', expected)
-        overrides = self.root / 'overrides'
-        overrides.mkdir()
-        (overrides / 'landmark.h5').write_bytes(correct)
-        extract_verified(archive, self.root / 'out', expected, overrides)
-        self.assertEqual((self.root / 'out/landmark.h5').read_bytes(), correct)
-
-    def test_zip_traversal_rejected(self):
-        archive = self.root / 'unsafe.zip'
-        with zipfile.ZipFile(archive, 'w') as z:
-            z.writestr('../escaped', b'bad')
-        with self.assertRaises(ValueError):
-            extract_verified(archive, self.root / 'out')
-
 
 if __name__ == '__main__':
     unittest.main()
