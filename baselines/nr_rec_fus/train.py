@@ -10,7 +10,7 @@ def main():
  for ep in range(c['epochs']):
   for b in dl:
    x=b['frames'].to(dev); out=model(x); gt=relative(b['tforms'].to(dev)); pose_loss=torch.nn.functional.smooth_l1_loss(out['pose'],gt)
-   flow=out['flow']; dx=(flow[..., :,1:]-flow[..., :, :-1]).abs().mean(); dy=(flow[..., 1:,:]-flow[..., :-1,:]).abs().mean(); smooth=dx+dy; loss=pose_loss+c['smooth_weight']*smooth; opt.zero_grad(); loss.backward(); opt.step(); steps+=1
+   flow=out['flow']; dx=(flow[..., :,1:]-flow[..., :, :-1]).abs().mean(); dy=(flow[..., 1:,:]-flow[..., :-1,:]).abs().mean(); smooth=dx+dy; photo=(out['warped']-x[:,0:1]).abs().mean(); loss=pose_loss+photo+c['smooth_weight']*smooth; opt.zero_grad(); loss.backward(); opt.step(); steps+=1
    if steps%10==0: print(f'epoch={ep} step={steps} loss={loss.item():.5f} pose={pose_loss.item():.5f}',flush=True)
    if a.steps and steps>=a.steps: return
 if __name__=='__main__': main()

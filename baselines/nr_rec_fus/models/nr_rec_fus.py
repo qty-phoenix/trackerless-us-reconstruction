@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from .rigid_pose import RigidPoseNet, se3_from_vec
-from .deformation import DeformationNet
+from .deformation import DeformationNet, warp
 
 class NRRecFUS(nn.Module):
     def __init__(self,num_samples=4):
@@ -11,5 +11,5 @@ class NRRecFUS(nn.Module):
         pose_vec=self.rigid(frames); flows=[]; warped=[]
         fixed=frames[:,0:1]
         for i in range(1,frames.shape[1]):
-            flow=self.deform(fixed,frames[:,i:i+1]); flows.append(flow); warped.append(frames[:,i:i+1]+0*flow[:,0:1])
+            flow=self.deform(fixed,frames[:,i:i+1]); flows.append(flow); warped.append(warp(frames[:,i:i+1],flow))
         return {'pose_vec':pose_vec,'pose':se3_from_vec(pose_vec),'flow':torch.stack(flows,1),'warped':torch.cat(warped,1)}
