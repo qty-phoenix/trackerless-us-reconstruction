@@ -69,7 +69,7 @@ $$
 官方评价预测重建位置与真值重建位置之间的欧氏距离：
 
 $$
-E=\operatorname{mean}_{p}\left\|\hat{\mathbf x}_{p}-\mathbf x_{p}^{GT}\right\|_2.
+E=\frac{1}{|P|}\sum_{p\in P}\left\|\hat{\mathbf x}_{p}-\mathbf x_{p}^{GT}\right\|_2.
 $$
 
 在不同参考帧和点集上计算，得到四项指标：
