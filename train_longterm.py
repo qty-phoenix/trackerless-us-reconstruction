@@ -46,8 +46,20 @@ def main(args):
     model = LongTermEfficientNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
-    best = float('inf'); history = []
-    for epoch in range(args.epochs):
+    best = float('inf'); history = []; start_epoch = 0
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model'])
+        if checkpoint.get('optimizer'):
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = int(checkpoint.get('epoch', -1)) + 1
+        history_path = output / 'history.json'
+        if history_path.exists():
+            history = json.loads(history_path.read_text())
+            if history:
+                best = min(float(x['val_distance_mm']) for x in history)
+        print(f'Resuming from epoch {start_epoch}', flush=True)
+    for epoch in range(start_epoch, args.epochs):
         model.train(); train_losses = []; train_distances = []
         for step, batch in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
@@ -60,9 +72,11 @@ def main(args):
                'train_distance_mm': float(np.mean(train_distances)),
                'val_loss': val_loss, 'val_distance_mm': val_distance}
         history.append(row); print(json.dumps(row), flush=True)
-        torch.save({'model': model.state_dict(), 'args': vars(args), 'epoch': epoch}, output / 'last.pt')
+        torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                    'args': vars(args), 'epoch': epoch}, output / 'last.pt')
         if val_distance < best:
-            best = val_distance; torch.save({'model': model.state_dict(), 'args': vars(args), 'epoch': epoch}, output / 'best.pt')
+            best = val_distance; torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                                             'args': vars(args), 'epoch': epoch}, output / 'best.pt')
         (output / 'history.json').write_text(json.dumps(history, indent=2))
 
 
@@ -74,4 +88,5 @@ if __name__ == '__main__':
     p.add_argument('--batch-size', type=int, default=32); p.add_argument('--workers', type=int, default=4)
     p.add_argument('--num-samples', type=int, default=10); p.add_argument('--sample-range', type=int, default=10)
     p.add_argument('--lr', type=float, default=1e-4); p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--resume', default='', help='Checkpoint path, e.g. runs/longterm/last.pt')
     p.add_argument('--device', default='cuda'); main(p.parse_args())
