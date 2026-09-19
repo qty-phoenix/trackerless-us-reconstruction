@@ -153,11 +153,11 @@ python scripts/preprocess_longterm.py
 python train_longterm.py \
   --root data/tus-rec2024 \
   --preprocessed data/tus-rec2024/preprocessed/longterm \
-  --output runs/longterm \
+  --output runs/longterm_v2 \
   --device cuda
 ```
 
-默认训练 100 个 epoch、批大小 32、学习率 `1e-4`。没有 GPU 时可用 `--device cpu --max-steps 1 --epochs 1` 做流程检查；`--max-steps` 只限制每个 epoch 的训练步数，不代表论文结果。最佳验证模型保存在 `runs/longterm/best.pt`，训练历史保存在 `runs/longterm/history.json`。
+默认训练 100 个 epoch、批大小 32、学习率 `1e-4`。没有 GPU 时可用 `--device cpu --max-steps 1 --val-steps 1 --epochs 1` 做流程检查；步数限制不代表论文结果。新训练的最佳验证模型保存在 `runs/longterm_v2/best.pt`，训练历史保存在 `runs/longterm_v2/history.json`。
 
 这是在 TUS-REC2024 上的统一复现版本：官方 2024 数据按受试者划分为 000–049 训练、050–052 验证，而论文原始实验使用作者发布的旧数据和交叉验证。因此，不能把本实验结果直接当作论文表格的数值；比较时应在同一 TUS-REC2024 划分上重新训练所有方法。
 
@@ -170,3 +170,81 @@ python train_longterm.py \
 5. [官方基线代码](https://github.com/QiLi111/tus-rec-challenge_baseline)
 6. [官方提交代码说明](https://github.com/QiLi111/tus-rec-challenge_baseline/blob/main/submission/README.md)
 7. [位姿到位移的官方转换代码](https://github.com/QiLi111/tus-rec-challenge_baseline/blob/main/submission/utils/Transf2DDFs.py)
+
+## 两个基线的统一训练与评估
+
+两个方法现已共用受试者隔离检查、确定性窗口验证、完整训练状态保存和整段扫描评估。NR 的三维体配准适配及其与原论文的差异见 [NR-Rec-FUS 说明](baselines/nr_rec_fus/README.md)。该实现属于方法适配，不能声称精确复现原论文结果。
+
+### 训练与恢复
+
+```bash
+# Long-Term：新训练默认写入 runs/longterm_v2，保留此前 runs/longterm
+/data/qty/anaconda3/bin/python train_longterm.py --device cuda
+
+# NR：默认写入 runs/nr_rec_fus
+/data/qty/anaconda3/bin/python -m baselines.nr_rec_fus.train \
+  --config baselines/nr_rec_fus/configs/tus_rec2024.json --device cuda
+```
+
+每个 epoch 都保存 `last.pt`、按固定窗口验证距离选择的 `best.pt`、`history.json` 和 `config.json`。检查点包含优化器、随机数状态和历史；恢复时要求采样、验证步数及批大小等设置一致。验证固定取每段扫描的前／中／后三个窗口，按窗口数加权平均；训练仍每个 epoch 为每段扫描取一个窗口。未指定 `--resume` 时禁止覆盖已有结果。CPU 必须显式指定 `--device cpu`。
+
+```bash
+/data/qty/anaconda3/bin/python train_longterm.py --device cuda \
+  --resume runs/longterm_v2/last.pt
+
+/data/qty/anaconda3/bin/python -m baselines.nr_rec_fus.train --device cuda \
+  --resume runs/nr_rec_fus/last.pt
+```
+
+Long-Term 默认仍为 10 帧、45 对、B1、100 epoch、batch 32；帧数参数现在同时控制模型和标签，避免只修改数据而造成维度错误。NR 默认连续 4 帧、B0、50 epoch、batch 2；这些训练预算及输入差异会记录在配置中。正式比较应报告这些差异，或显式选择一致的训练预算，不能直接比较训练 loss。
+
+Long-Term 原有 `runs/longterm/best.pt` 可直接交给新评估器。若恢复旧格式权重训练，使用新输出目录并将 `--epochs` 设置为大于检查点 epoch 的目标总数。旧检查点没有完整随机数状态，无法保证与旧脚本未中断训练完全一致；旧随机验证与新固定验证不可直接拼接，迁移时重新建立最佳验证记录。Long-Term 训练保留旧版零起点四角点约定与预处理标定，以兼容已有权重；完整扫描评估独立使用官方像素坐标。
+
+### 四项几何指标
+
+```bash
+# 可直接评估已经训练好的 Long-Term
+/data/qty/anaconda3/bin/python evaluate.py \
+  --checkpoint runs/longterm/best.pt --device cuda \
+  --output runs/eval_longterm
+
+# 训练 NR 后用完全相同的验证扫描与评分器评估
+/data/qty/anaconda3/bin/python evaluate.py \
+  --checkpoint runs/nr_rec_fus/best.pt --device cuda \
+  --output runs/eval_nr_rec_fus
+```
+
+默认评估全部 72 段验证扫描和原始 480×640 的全部像素；标志点按官方坐标直接读取。模型只接收图像，评分阶段才读取位姿。两个方法使用相同的窗口拼接规则：步长为输入帧数减一，以已经放置的窗口首帧为锚点，保留已有重叠帧，补齐尾窗口；短于输入长度的扫描重复末帧填充。Long-Term 选择每个窗口的 `(0,j)` 长距离预测，NR 选择同样的首帧相对预测。
+
+输出包括：
+
+- `metrics.json`：方法配置、扫描数、四项误差均值／标准差、推理时间，以及是否只评估部分扫描。
+- `per_scan.jsonl`：逐扫描 GPE、GLE、LPE、LLE（毫米，越小越好）。最终均值对扫描等权，不能把长扫描当作更高权重。
+- 每段扫描的 `prediction.npz`：预测全局工具变换，以及 NR 使用的三维形变场与体边界。
+
+评分分块计算全部像素，`--chunk-size` 只控制内存，不做像素抽样。`--max-scans 1` 可检查一段完整扫描；此时 `partial=true`，不能充当完整验证集结果。`--rigid-only` 可评估 NR 的刚性分支消融。验证集用于选模型，结果不能替代官方隐藏测试集泛化结论；本工具也不计算依赖其他参赛方法结果的官方归一化排名分数。
+
+### 坐标与提交接口
+
+转换依据官方 `submission/utils/{plot_functions,transform,Transf2DDFs}.py`：原始像素 `x=1..640, y=1..480`，按行展平且 x 最快变化；相对工具变换通过 `C^-1 T C` 转入参考图像毫米坐标，再作用于 `S p`。标志点帧编号 `k` 对应原序列 `frames[k]`、不含首帧的变换数组第 `k-1` 项；有效范围为 `1..N-1`。不对标志点坐标再加减一。
+
+`predict_ddfs.py` 提供官方形状的 `predict_ddfs(frames, landmark, data_path_calib)`，返回顺序是 GP、GL、LP、LL。设置 `TUSREC_CHECKPOINT` 指向任一方法权重，`TUSREC_DEVICE` 默认为 `cuda`。接口不接收真实位姿；完整挑战赛容器打包仍需按主办方环境完成。
+
+直接返回两组全像素位移需要约 `7.37 MB × (N-1)` 内存。离线评估通常只需要四项误差，不必物化这些数组；若需要保存位移，给 `evaluate.py` 添加 `--export-ddfs`，使用 `.npy` 内存映射逐块写入 GP、LP，并保存 GL、LL。
+
+### 流程检查
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /data/qty/anaconda3/bin/python \
+  -m unittest discover -s tests -v
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /data/qty/anaconda3/bin/python \
+  train_longterm.py --device cpu --epochs 1 --batch-size 2 --workers 0 \
+  --max-steps 1 --val-steps 1 --output runs/longterm_smoke_v2
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /data/qty/anaconda3/bin/python \
+  -m baselines.nr_rec_fus.train --device cpu --epochs 1 \
+  --steps 1 --val-steps 1 --output runs/nr_smoke_v2
+```
+
+步数限制会记录为 `debug_run=true`，这些运行仅用于验证流程，不能解释为方法性能。

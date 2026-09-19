@@ -18,7 +18,7 @@ def reference_image_points(height=120, width=160):
 
 def relative_tool_transforms(tforms):
     """T(tool_j -> tool_i) for every configured pair; shape [B,45,4,4]."""
-    pairs = pair_samples().to(tforms.device)
+    pairs = pair_samples(tforms.shape[1], tforms.shape[1] - 1).to(tforms.device)
     inv = torch.linalg.inv(tforms)
     return inv[:, pairs[:, 0]] @ tforms[:, pairs[:, 1]]
 
@@ -45,14 +45,20 @@ def euler_xyz_to_matrix(params):
 
 
 class LongTermEfficientNet(nn.Module):
-    def __init__(self, num_pairs=45, pretrained=False):
+    def __init__(self, num_pairs=None, pretrained=False, num_samples=10):
         super().__init__()
+        if num_samples < 2:
+            raise ValueError('num_samples must be >= 2')
+        self.num_samples = num_samples
+        self.num_pairs = num_samples * (num_samples - 1) // 2
+        if num_pairs is not None and num_pairs != self.num_pairs:
+            raise ValueError('num_pairs must match all pairs of num_samples')
         weights = None
         self.backbone = efficientnet_b1(weights=weights)
         first = self.backbone.features[0][0]
-        self.backbone.features[0][0] = nn.Conv2d(10, first.out_channels, first.kernel_size,
+        self.backbone.features[0][0] = nn.Conv2d(num_samples, first.out_channels, first.kernel_size,
                                                    first.stride, first.padding, bias=first.bias is not None)
-        self.backbone.classifier[1] = nn.Linear(self.backbone.classifier[1].in_features, num_pairs * 6)
+        self.backbone.classifier[1] = nn.Linear(self.backbone.classifier[1].in_features, self.num_pairs * 6)
 
     def forward(self, frames):
-        return self.backbone(frames).reshape(frames.shape[0], 45, 6)
+        return self.backbone(frames).reshape(frames.shape[0], self.num_pairs, 6)

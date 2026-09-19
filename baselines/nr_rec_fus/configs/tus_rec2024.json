@@ -2,7 +2,7 @@
   "root": "data/tus-rec2024",
   "preprocessed": "data/tus-rec2024/preprocessed/longterm",
   "num_samples": 4,
-  "sample_range": 8,
+  "sample_range": 4,
   "height": 120,
   "width": 160,
   "batch_size": 2,
@@ -10,5 +10,13 @@
   "lr": 0.0001,
   "reg_loss_weight": 1000.0,
   "smooth_weight": 0.01,
-  "model": "efficientnet_b0"
+  "model": "efficientnet_b0",
+  "output": "runs/nr_rec_fus",
+  "seed": 0,
+  "val_windows": 3,
+  "volume_shape": [32, 64, 64],
+  "deform_channels": 8,
+  "max_displacement_mm": 5.0,
+  "margin_mm": 10.0,
+  "refined_loss_weight": 1.0
 }
