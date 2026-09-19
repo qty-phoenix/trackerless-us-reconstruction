@@ -1,0 +1,14 @@
+{
+  "root": "data/tus-rec2024",
+  "preprocessed": "data/tus-rec2024/preprocessed/longterm",
+  "num_samples": 4,
+  "sample_range": 8,
+  "height": 120,
+  "width": 160,
+  "batch_size": 2,
+  "epochs": 50,
+  "lr": 0.0001,
+  "reg_loss_weight": 1000.0,
+  "smooth_weight": 0.01,
+  "model": "efficientnet_b0"
+}

@@ -1,0 +1,11 @@
+{
+  "method": "NR-Rec-FUS",
+  "dataset": "TUS-REC2024",
+  "train_scans": 1200,
+  "val_scans": 72,
+  "data_in_place": true,
+  "resolution": [
+    120,
+    160
+  ]
+}
