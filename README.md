@@ -186,7 +186,7 @@ python train_longterm.py \
   --config baselines/nr_rec_fus/configs/tus_rec2024.json --device cuda
 ```
 
-每个 epoch 都保存 `last.pt`、按固定窗口验证距离选择的 `best.pt`、`history.json` 和 `config.json`。检查点包含优化器、随机数状态和历史；恢复时要求采样、验证步数及批大小等设置一致。验证固定取每段扫描的前／中／后三个窗口，按窗口数加权平均；训练仍每个 epoch 为每段扫描取一个窗口。未指定 `--resume` 时禁止覆盖已有结果。CPU 必须显式指定 `--device cpu`。
+每个 epoch 都保存 `last.pt`、按固定窗口验证距离选择的 `best.pt`、`history.json`、`config.json`，并更新 `loss_curves.png` 和矢量版 `loss_curves.svg`。曲线包含总损失、点距离、刚性距离、细化损失和三维配准损失的 train/val 对照。检查点包含优化器、随机数状态和历史；恢复时要求采样、验证步数及批大小等设置一致。验证固定取每段扫描的前／中／后三个窗口，按窗口数加权平均；训练仍每个 epoch 为每段扫描取一个窗口。未指定 `--resume` 时禁止覆盖已有结果。CPU 必须显式指定 `--device cpu`。
 
 ```bash
 /data/qty/anaconda3/bin/python train_longterm.py --device cuda \
@@ -248,3 +248,53 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /data/qty/anaconda3/bin/python \
 ```
 
 步数限制会记录为 `debug_run=true`，这些运行仅用于验证流程，不能解释为方法性能。
+
+## MoGLo-Net 复现
+
+MoGLo-Net（Lee et al., IEEE TMI 2025）公开实现使用共享图像编码器、patch-wise correlation、global-local self-attention、双 LSTM 运动头和 MME／相关性／triplet 复合损失。作者代码和原始数据协议见 [US3D](https://github.com/pnu-amilab/US3D)。本目录提供针对 TUS-REC2024 的适配：输入连续 5 帧，模型输入为 120×160 灰度图，监督为相邻帧的标定毫米坐标相对变换；训练推理均不输入跟踪器位姿。
+
+作者论文实验使用 Forearm_Main 数据、特定 `y_scale`、256×256 图像、1001 epoch 和其自定义划分。本适配使用 TUS-REC2024 的 000–049／050–052 受试者划分、公开挑战赛的标定和 GP／GL／LP／LL 评估，因此不是论文表格的数值复现。配置中的 `motion_scale` 只用于稳定 6-DoF 回归，预测时会还原到毫米和弧度。
+
+```bash
+/data/qty/anaconda3/bin/python -m baselines.moglo_net.train \
+  --config baselines/moglo_net/configs/tus_rec2024.json --device cuda
+```
+
+默认输出 `runs/moglo_net/{best.pt,last.pt,history.json,steps.jsonl,loss_curves.png,loss_curves.svg}`；最佳模型按固定的三个验证窗口选择。整段扫描评估与两个已有基线使用同一评分器：
+
+```bash
+/data/qty/anaconda3/bin/python evaluate.py \
+  --checkpoint runs/moglo_net/best.pt --method moglo_net --device cuda \
+  --output runs/eval_moglo_net
+```
+
+完整 GPU 实验脚本会保存环境、源文件哈希、命令日志、逐批次损失、逐扫描预测／真值／误差、损失曲线和校验清单：
+
+```bash
+/data/qty/anaconda3/bin/python scripts/run_moglo_experiment.py \
+  --output runs/experiments/moglo_20260920_gpu0 --gpu 0
+```
+
+### 双 GPU 实验与原始记录
+
+`scripts/run_baseline_experiment.py` 用物理 GPU 0 评估已经完成 100 epoch 的 `runs/longterm/best.pt`，用物理 GPU 1 按配置训练 NR，再评估 NR 完整模型和刚性分支。它保存代码快照、Git 版本及差异、环境版本、数据索引与标定、源文件大小和修改时间、权重校验值、所有子进程命令／退出码／日志及每 30 秒 GPU 状态。输出目录必须是新目录。
+
+```bash
+/data/qty/anaconda3/bin/python scripts/run_baseline_experiment.py --output runs/experiments/my_gpu01_run
+```
+
+查询已有实验的进度（不会操作 GPU 进程）：
+
+```bash
+/data/qty/anaconda3/bin/python scripts/experiment_status.py runs/experiments/20260919_gpu01
+```
+
+新训练额外保存 `steps.jsonl`：每个训练批次和每个验证窗口的全部损失分量、毫米距离、扫描编号、帧索引、学习率与时间。旧 Long-Term 只有原始 epoch 历史，无法补造历史逐批次数据；实验归档会从该历史重绘标准曲线。也可以手动运行 `scripts/plot_training_history.py runs/.../history.json`。
+
+评估默认在 `--device` 指定的设备上计算几何指标；可用 `--metric-device cpu` 单独选择 CPU 评分。每段扫描保存：
+
+- `prediction.npz`：完整预测变换、像素标定、空间标定及 NR 的形变场／体边界。
+- `reference.npz`：对应真实位姿与标志点，仅用于评估和结果复核。
+- `errors.npz`：逐帧全像素平均误差、20 个标志点各自的误差、预测及真实 GL／LL。
+
+这些记录可重新生成全部 GP／GL／LP／LL 并重新评分，不需要重复存储原始超声图像或数百 GB 的全像素位移。实验结束后生成 `comparison.json`、`per_scan_comparison.csv`、`REPORT.md` 和产物 SHA-256 清单。报告明确保留两种方法训练预算和检查点选择协议不同这一限制。

@@ -16,6 +16,7 @@ from baselines.nr_rec_fus.models.volume import splat, volume_bounds, bending_ene
 from baselines.nr_rec_fus.train import loss_and_metrics
 from models_longterm import LongTermEfficientNet, relative_tool_transforms
 from training import run_training, seed_all
+from baselines.moglo_net.models import MoGLoNet
 
 
 class GeometryTests(unittest.TestCase):
@@ -91,6 +92,16 @@ class GeometryTests(unittest.TestCase):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_moglo_net_heads_and_attention(self):
+        torch.manual_seed(0)
+        model = MoGLoNet(num_samples=5, base=8).eval()
+        with torch.no_grad():
+            predictions, embedding, attention = model(torch.rand(2, 5, 1, 120, 160))
+        self.assertEqual(predictions.shape, (2, 2, 4, 6))
+        self.assertEqual(embedding.shape[:2], (2, 4))
+        self.assertEqual(attention.shape, (2, 4, 4))
+        self.assertTrue(torch.isfinite(predictions).all())
+
     def test_split_file_loader_fixed_validation_and_epoch_sampling(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

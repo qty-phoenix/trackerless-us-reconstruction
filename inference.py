@@ -56,6 +56,9 @@ class Predictor:
         self.size = self.config.get('height', 120), self.config.get('width', 160)
         if self.method == 'longterm':
             self.model = LongTermEfficientNet(num_samples=self.window)
+        elif self.method == 'moglo_net':
+            from baselines.moglo_net.models import MoGLoNet
+            self.model = MoGLoNet(num_samples=self.window)
         elif self.method == 'nr_rec_fus':
             from baselines.nr_rec_fus.train import build_model
             self.model = build_model(self.config)
@@ -78,6 +81,11 @@ class Predictor:
                 transforms = euler_xyz_to_matrix(self.model(x[None]))[0]
                 pairs = pair_samples(self.window, self.window - 1)
                 relative = transforms[pairs[:, 0] == 0]
+            elif self.method == 'moglo_net':
+                from baselines.moglo_net.models import se3_from_vec
+                scale = torch.as_tensor(self.config['motion_scale'], device=self.device, dtype=x.dtype)
+                predictions, _, _ = self.model(x[None, :, None])
+                relative = se3_from_vec(predictions.mean(1)[0] * scale)
             else:
                 from baselines.nr_rec_fus.models.rigid_pose import se3_from_vec
                 relative = se3_from_vec(self.model.rigid(x[None]))[0]

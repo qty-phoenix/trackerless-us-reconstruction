@@ -121,7 +121,8 @@ def iter_pixel_ddfs(prediction, height=480, width=640, chunk_size=16384):
 
 
 @torch.no_grad()
-def score_scan(prediction, tool_to_world, landmarks, height=480, width=640, chunk_size=16384):
+def score_scan(prediction, tool_to_world, landmarks, height=480, width=640, chunk_size=16384,
+               return_details=False):
     # Labels enter only the scorer, after inference has completed.
     labels = torch.as_tensor(tool_to_world).to(prediction.tool_global)
     if labels.shape != prediction.tool_global.shape or not torch.isfinite(labels).all():
@@ -129,14 +130,27 @@ def score_scan(prediction, tool_to_world, landmarks, height=480, width=640, chun
     truth = ScanPrediction(global_from_labels(labels),
                            prediction.pixel_to_mm, prediction.image_mm_to_tool)
     sums = np.zeros(2, dtype=np.float64)
+    frame_sums = np.zeros((2, len(labels) - 1), dtype=np.float64)
     count = 0
     for pred, target in zip(iter_pixel_ddfs(prediction, height, width, chunk_size),
                             iter_pixel_ddfs(truth, height, width, chunk_size)):
         for j in range(2):
-            sums[j] += torch.linalg.vector_norm(pred[2+j] - target[2+j], dim=0).sum().item()
+            value = torch.linalg.vector_norm(pred[2+j] - target[2+j], dim=0).sum().item()
+            sums[j] += value
+            frame_sums[j, pred[0]] += value
         count += pred[2].shape[1]
     if count == 0:
         raise ValueError('A scan needs at least two frames')
     pred_l, true_l = landmark_ddfs(prediction, landmarks), landmark_ddfs(truth, landmarks)
-    distances = [torch.linalg.vector_norm(p - t, dim=0).mean().item() for p, t in zip(pred_l, true_l)]
-    return {'GPE': sums[0] / count, 'GLE': distances[0], 'LPE': sums[1] / count, 'LLE': distances[1]}
+    landmark_errors = [torch.linalg.vector_norm(p - t, dim=0) for p, t in zip(pred_l, true_l)]
+    distances = [x.mean().item() for x in landmark_errors]
+    metrics = {'GPE': sums[0] / count, 'GLE': distances[0], 'LPE': sums[1] / count, 'LLE': distances[1]}
+    if not return_details:
+        return metrics
+    details = {'global_pixel_error_per_frame_mm': frame_sums[0] / (height * width),
+               'local_pixel_error_per_frame_mm': frame_sums[1] / (height * width),
+               'global_landmark_errors_mm': landmark_errors[0].cpu().numpy(),
+               'local_landmark_errors_mm': landmark_errors[1].cpu().numpy(),
+               'pred_GL': pred_l[0].cpu().numpy(), 'pred_LL': pred_l[1].cpu().numpy(),
+               'true_GL': true_l[0].cpu().numpy(), 'true_LL': true_l[1].cpu().numpy()}
+    return metrics, details
