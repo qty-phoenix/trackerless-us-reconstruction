@@ -32,7 +32,14 @@ def loss_and_metrics(model, batch, scale, spatial, config, device):
     smooth = bending_energy(out['field'], out['bounds'])
     registration = photo + config['smooth_weight'] * smooth
     loss = rigid_loss + config['refined_loss_weight'] * refined_loss + config['reg_loss_weight'] * registration
+    corners = torch.tensor([0, frames.shape[-1] - 1,
+                            (frames.shape[-2] - 1) * frames.shape[-1],
+                            frames.shape[-2] * frames.shape[-1] - 1], device=device)
+    selection = torch.linalg.vector_norm(
+        out['rigid_points'][:, 1].index_select(-1, corners) -
+        target[:, 1].index_select(-1, corners), dim=1).mean()
     return loss, {'distance_mm': torch.linalg.vector_norm(out['points'][:, 1:] - target[:, 1:], dim=2).mean(),
+                  'selection_distance_mm': selection,
                   'rigid_distance_mm': torch.linalg.vector_norm(out['rigid_points'][:, 1:] - target[:, 1:], dim=2).mean(),
                   'rigid_loss': rigid_loss, 'refined_loss': refined_loss,
                   'registration_loss': registration, 'photo_loss': photo, 'bending_loss': smooth}
@@ -54,7 +61,10 @@ def main():
     allowed = {'root', 'preprocessed', 'num_samples', 'sample_range', 'height', 'width',
                'batch_size', 'epochs', 'lr', 'reg_loss_weight', 'smooth_weight', 'model',
                'output', 'seed', 'val_windows', 'volume_shape', 'deform_channels',
-               'max_displacement_mm', 'margin_mm', 'refined_loss_weight'}
+               'max_displacement_mm', 'margin_mm', 'refined_loss_weight', 'selection_metric',
+               'frame_cache'}
+    allowed.update({'effective_batch_size', 'val_batch_size', 'validate_every', 'plot_every',
+                    'train_shuffle', 'optimizer', 'weight_decay', 'grad_clip', 'protocol'})
     if set(c) - allowed:
         raise ValueError(f'Unknown configuration keys: {set(c) - allowed}')
     c = {'seed': 0, 'val_windows': 3, 'refined_loss_weight': 1., **c}
@@ -68,7 +78,8 @@ def main():
     size = c['height'], c['width']
     scale, spatial = calibration_tensors(Path(c['root']) / 'calib_matrix.csv', device, size=size)
     datasets = [NRRecDataset(c['root'], split, c['preprocessed'], c['num_samples'], c['sample_range'],
-                             size, c['seed'], c['val_windows']) for split in ('train', 'val')]
+                             size, c['seed'], c['val_windows'], c.get('frame_cache'))
+                for split in ('train', 'val')]
     model = build_model(c).to(device)
 
     def objective(model, batch):

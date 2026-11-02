@@ -17,6 +17,13 @@ from baselines.nr_rec_fus.train import loss_and_metrics
 from models_longterm import LongTermEfficientNet, relative_tool_transforms
 from training import run_training, seed_all
 from baselines.moglo_net.models import MoGLoNet
+from baselines.recon.models import (RecON, chain_relative, dof_to_matrix,
+                                    matrix_to_dof, pair_inputs)
+from baselines.dc2_net.models import DC2Net
+from baselines.dc2_net.train import margin_ranking_loss, pearson_case_loss
+from baselines.two_frame_cnn.models import TwoFrameCNN
+from baselines.two_frame_cnn.dataset import TwoFrameDataset
+from baselines.two_frame_cnn.train import motion_labels as two_frame_motion_labels
 
 
 class GeometryTests(unittest.TestCase):
@@ -46,8 +53,15 @@ class GeometryTests(unittest.TestCase):
         b = score_scan(prediction, labels, [[1, 2, 1], [2, 3, 2]], 2, 3, 20)
         self.assertEqual(a, b)
         self.assertTrue(all(v == 0 for v in a.values()))
+        # Released official landmarks can contain frame 0. The official
+        # converter indexes its N-1 transform array at frame_id-1, so 0 maps
+        # to the final transform rather than being rejected.
+        zero = landmark_ddfs(prediction, [[0, 1, 1]])
+        final = landmark_ddfs(prediction, [[2, 1, 1]])
+        for actual, expected in zip(zero, final):
+            torch.testing.assert_close(actual, expected)
         with self.assertRaises(ValueError):
-            landmark_ddfs(prediction, [[0, 1, 1]])
+            landmark_ddfs(prediction, [[-1, 1, 1]])
         with self.assertRaises(ValueError):
             landmark_ddfs(prediction, [[3, 1, 1]])
 
@@ -92,6 +106,25 @@ class GeometryTests(unittest.TestCase):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_recon_motion_inputs_backbone_and_composition(self):
+        torch.manual_seed(0)
+        motion = torch.tensor([[[1., 2., 3., .1, -.2, .3],
+                                [-1., .5, 2., -.2, .1, .05]]])
+        torch.testing.assert_close(matrix_to_dof(dof_to_matrix(motion)), motion,
+                                   atol=1e-6, rtol=1e-6)
+        chained = chain_relative(dof_to_matrix(motion))
+        self.assertEqual(chained.shape, (1, 3, 4, 4))
+        torch.testing.assert_close(chained[:, 0], torch.eye(4)[None])
+        frames = torch.rand(1, 4, 32, 40)
+        inputs = pair_inputs(frames)
+        self.assertEqual(inputs.shape, (1, 3, 6, 32, 40))
+        model = RecON(False).eval()
+        with torch.no_grad():
+            prediction, feature = model.backbone(inputs, True)
+        self.assertEqual(prediction.shape, (1, 3, 6))
+        self.assertEqual(feature.shape, (1, 3, 512))
+        self.assertTrue(torch.isfinite(prediction).all())
+
     def test_moglo_net_heads_and_attention(self):
         torch.manual_seed(0)
         model = MoGLoNet(num_samples=5, base=8).eval()
@@ -101,6 +134,38 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(embedding.shape[:2], (2, 4))
         self.assertEqual(attention.shape, (2, 4, 4))
         self.assertTrue(torch.isfinite(predictions).all())
+
+    def test_dc2_net_attention_and_contextual_contrastive_losses(self):
+        torch.manual_seed(0)
+        model = DC2Net((1, 1, 1, 1), groups=1, base_width=4).eval()
+        with torch.no_grad():
+            prediction, embedding, attention = model(torch.rand(2, 5, 32, 40))
+        self.assertEqual(prediction.shape, (2, 6))
+        self.assertEqual(embedding.shape, (2, 2048))
+        self.assertEqual(attention.shape[:2], (2, 1))
+        self.assertTrue(((attention >= 0) & (attention <= 1)).all())
+        target = torch.tensor([[[0., 0.], [1., 1.], [2., 2.]],
+                               [[2., 1.], [1., 0.], [0., -1.]]])
+        self.assertLess(float(pearson_case_loss(target, target)), 1e-5)
+        features = torch.tensor([[0., 0.], [1., 0.], [3., 0.]])
+        labels = torch.tensor([[0., 0.], [1., 0.], [3., 0.]])
+        self.assertGreaterEqual(float(margin_ranking_loss(features, labels, .25)), 0.)
+
+    def test_two_frame_cnn_architecture_and_flip_geometry(self):
+        torch.manual_seed(0)
+        model = TwoFrameCNN(dropout=.25).eval()
+        with torch.no_grad():
+            prediction = model(torch.rand(3, 2, 128, 128))
+        self.assertEqual(prediction.shape, (3, 6))
+        self.assertTrue(torch.isfinite(prediction).all())
+        self.assertEqual(model.fc1.in_features, 64 * 2 * 2)
+        tforms = torch.eye(4).repeat(2, 2, 1, 1)
+        tforms[:, 1, 0, 3] = 2
+        scale = torch.diag(torch.tensor([.5, .75, 1., 1.]))
+        labels = two_frame_motion_labels(tforms, torch.eye(4), scale,
+                                         torch.tensor([False, True]))
+        torch.testing.assert_close(labels[0], torch.tensor([2., 0., 0., 0., 0., 0.]))
+        torch.testing.assert_close(labels[1], torch.tensor([-2., 0., 0., 0., 0., 0.]))
 
     def test_split_file_loader_fixed_validation_and_epoch_sampling(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,6 +186,21 @@ class TrainingTests(unittest.TestCase):
                     self.assertEqual(ds[i]['tforms'].shape, (4, 4, 4))
                 self.assertEqual(len(ds._files), 2)
                 ds.close()
+            train_rows = [{**row, 'id': f'050/scan_{i}'} for i in range(3)]
+            (root / 'train.jsonl').write_text(''.join(json.dumps(value) + '\n'
+                                                      for value in train_rows))
+            packed = TwoFrameDataset(root, 'train', root, pairs_per_scan=2)
+            single = TwoFrameDataset(root, 'train', root, pairs_per_scan=1)
+            for virtual_epoch in range(2):
+                single.set_epoch(virtual_epoch)
+                for position in range(3):
+                    expected = single[position]
+                    actual = packed[virtual_epoch * 3 + position]
+                    self.assertEqual(expected['scan_id'], actual['scan_id'])
+                    for key in ('frames', 'tforms', 'indices', 'flipped'):
+                        torch.testing.assert_close(expected[key], actual[key])
+            packed.close()
+            single.close()
 
     def test_rodrigues_zero_has_rotation_gradient(self):
         params = torch.zeros(1, 6, requires_grad=True)
@@ -176,7 +256,8 @@ class TrainingTests(unittest.TestCase):
             seed_all(7)
             model = torch.nn.Sequential(torch.nn.Linear(1, 4), torch.nn.Dropout(.2), torch.nn.Linear(4, 1))
             run_training(model, TinyDataset('000'), TinyDataset('050'), objective,
-                         {'seed': 7, 'method': 'tiny'}, 'cpu', path, epochs, 2, .01, resume=resume)
+                         {'seed': 7, 'method': 'tiny', 'lr_step_size': 1, 'lr_gamma': .5},
+                         'cpu', path, epochs, 2, .01, resume=resume)
             return torch.load(path / 'last.pt', weights_only=False)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

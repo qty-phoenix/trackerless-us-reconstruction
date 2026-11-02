@@ -1,7 +1,8 @@
 """TUS-REC2024 geometry, using the official submission's conventions.
 
 Pixels: x=1..W, y=1..H, x varies fastest. Landmark frame k indexes scan[k]
-(the official converter indexes the N-1 transform array at k-1).
+(the official converter indexes the N-1 transform array at k-1, so an
+official frame id of 0 selects its final transform through index -1).
 Transforms here map tool_i to tool_0 unless explicitly named image transforms.
 """
 from dataclasses import dataclass
@@ -79,8 +80,14 @@ def landmark_points(landmarks, n, *, device='cpu', dtype=torch.float64):
     if value.ndim != 2 or value.shape[1] != 3 or not len(value) or not torch.isfinite(value).all():
         raise ValueError('landmarks must be a finite nonempty [L,3] array')
     ids = value[:, 0].long()
-    if not torch.equal(ids.to(value), value[:, 0]) or (ids < 1).any() or (ids >= n).any():
-        raise ValueError('Official landmark frame indices must be integers in [1,N-1]')
+    if not torch.equal(ids.to(value), value[:, 0]) or (ids < 0).any() or (ids >= n).any():
+        raise ValueError('Official landmark frame indices must be integers in [0,N-1]')
+    # The official submission converter stores transforms for frames 1..N-1
+    # and indexes that array with landmark_frame - 1. Several released scans
+    # contain frame 0, for which NumPy/PyTorch therefore selects the final
+    # transform. Preserve that benchmark behavior explicitly with our N-entry
+    # representation (whose element 0 is identity).
+    ids = torch.where(ids == 0, n - 1, ids)
     points = torch.cat((value[:, 1:].T, torch.zeros(1, len(value), device=device, dtype=dtype),
                         torch.ones(1, len(value), device=device, dtype=dtype)))
     return ids, points

@@ -45,16 +45,22 @@ def capture(command):
     return subprocess.check_output(command, cwd=REPO, text=True).strip()
 
 
-def snapshot(out):
+def snapshot(out, min_gpus=2):
     import torch
     import torchvision
     import numpy
     import h5py
-    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-        raise RuntimeError('Both CUDA GPUs must be visible to the experiment supervisor')
+    try:
+        import cv2
+        opencv = cv2.__version__
+    except ImportError:
+        opencv = None
+    if not torch.cuda.is_available() or torch.cuda.device_count() < min_gpus:
+        raise RuntimeError(f'At least {min_gpus} CUDA GPU(s) must be visible to the experiment supervisor')
     versions = {'python': sys.version, 'executable': sys.executable, 'platform': platform.platform(),
                 'torch': torch.__version__, 'torchvision': torchvision.__version__,
-                'numpy': numpy.__version__, 'h5py': h5py.__version__, 'cuda': torch.version.cuda,
+                'numpy': numpy.__version__, 'h5py': h5py.__version__, 'opencv': opencv,
+                'cuda': torch.version.cuda,
                 'cudnn': torch.backends.cudnn.version(), 'gpu_count': torch.cuda.device_count(),
                 'gpus': [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
                 'nvidia_smi': capture(['nvidia-smi']), 'git_head': capture(['git', 'rev-parse', 'HEAD']),
@@ -77,6 +83,7 @@ def snapshot(out):
     metadata = ['calib_matrix.csv', 'status.json', 'manifests/train.jsonl', 'manifests/val.jsonl',
                 'preprocessed/longterm/train.jsonl', 'preprocessed/longterm/val.jsonl',
                 'preprocessed/longterm/metadata.json', 'preprocessed/longterm/image_to_tool_downsampled.npy']
+    metadata.append('preprocessed/two_frame_cnn/metadata.json')
     hashes, files = {}, {}
     for name in metadata:
         source = REPO / 'data/tus-rec2024' / name
@@ -110,10 +117,12 @@ def command(out, method, gpu, phase, args):
     log_path = out / method / f'{phase}.log'
     argv = [sys.executable, '-u', *args]
     env = {**os.environ, 'CUDA_VISIBLE_DEVICES': str(gpu), 'OMP_NUM_THREADS': '4',
-           'MKL_NUM_THREADS': '4', 'PYTHONUNBUFFERED': '1'}
+           'MKL_NUM_THREADS': '4', 'PYTHONUNBUFFERED': '1',
+           'PYTHONFAULTHANDLER': '1'}
     record = {'phase': phase, 'argv': argv, 'cwd': str(REPO), 'gpu': gpu,
               'started_utc': utc(), 'environment_overrides': {k: env[k] for k in
-                  ('CUDA_VISIBLE_DEVICES', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'PYTHONUNBUFFERED')}}
+                  ('CUDA_VISIBLE_DEVICES', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+                   'PYTHONUNBUFFERED', 'PYTHONFAULTHANDLER')}}
     with log_path.open('w', buffering=1) as log:
         process = subprocess.Popen(argv, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
         update(out, method, state='running', phase=phase, subprocess_pid=process.pid,

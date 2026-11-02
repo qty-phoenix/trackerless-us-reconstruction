@@ -55,7 +55,14 @@ def objective(model, batch, scale, spatial, config, device):
         predicted_points = (predicted_t @ (scale @ points))[:, :, :3]
         true_points = (true_t @ (scale @ points))[:, :, :3]
         distance = torch.linalg.vector_norm(predicted_points - true_points, dim=2).mean()
+        corners = torch.tensor([0, frames.shape[-1] - 1,
+                                (frames.shape[-2] - 1) * frames.shape[-1],
+                                frames.shape[-2] * frames.shape[-1] - 1], device=device)
+        selection = torch.linalg.vector_norm(
+            predicted_points[:, 0].index_select(-1, corners) -
+            true_points[:, 0].index_select(-1, corners), dim=1).mean()
     return loss, {'distance_mm': distance, 'MME': mme, 'COR': correlation,
+                  'selection_distance_mm': selection,
                   'TRI': triplet, 'motion_mae': (predicted_motion - true_motion).abs().mean()}
 
 
@@ -79,9 +86,11 @@ def main():
     scale, spatial = calibration_tensors(Path(config['root']) / 'calib_matrix.csv', device,
                                          size=(config['height'], config['width']))
     train = MoGLoDataset(config['root'], 'train', config['preprocessed'], config['num_samples'],
-                         config['sample_range'], (config['height'], config['width']), config['seed'], config['val_windows'])
+                         config['sample_range'], (config['height'], config['width']), config['seed'], config['val_windows'],
+                         config.get('frame_cache'))
     val = MoGLoDataset(config['root'], 'val', config['preprocessed'], config['num_samples'],
-                       config['sample_range'], (config['height'], config['width']), config['seed'], config['val_windows'])
+                       config['sample_range'], (config['height'], config['width']), config['seed'], config['val_windows'],
+                       config.get('frame_cache'))
     model = MoGLoNet(config['num_samples']).to(device)
     fn = lambda m, b: objective(m, b, scale, spatial, config, device)
     run_training(model, train, val, fn, config, device, a.output or config['output'], config['epochs'],

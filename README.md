@@ -4,6 +4,9 @@
 
 数据集下载、官方划分、校验方式和读取示例见 [DATASET.md](DATASET.md)。运行 `python scripts/dataset_status.py` 可查看准备进度。
 
+统一数据划分、训练预算和测试条件下的受控比较协议见
+[FAIRBENCH.md](FAIRBENCH.md)。该协议与下方保留各论文配方的复现结果分开记录。
+
 Long-Term Dependency 方法的统一预处理和复现代码见[下方说明](#long-term-dependency-复现)。
 
 ## 1. 核心任务定义
@@ -171,9 +174,9 @@ python train_longterm.py \
 6. [官方提交代码说明](https://github.com/QiLi111/tus-rec-challenge_baseline/blob/main/submission/README.md)
 7. [位姿到位移的官方转换代码](https://github.com/QiLi111/tus-rec-challenge_baseline/blob/main/submission/utils/Transf2DDFs.py)
 
-## 两个基线的统一训练与评估
+## 基线的统一训练与评估
 
-两个方法现已共用受试者隔离检查、确定性窗口验证、完整训练状态保存和整段扫描评估。NR 的三维体配准适配及其与原论文的差异见 [NR-Rec-FUS 说明](baselines/nr_rec_fus/README.md)。该实现属于方法适配，不能声称精确复现原论文结果。
+各方法共用受试者隔离检查、确定性窗口验证、完整训练状态保存和整段扫描评估。NR 的三维体配准适配及其与原论文的差异见 [NR-Rec-FUS 说明](baselines/nr_rec_fus/README.md)。各实现属于方法适配，不能声称精确复现原论文结果。
 
 ### 训练与恢复
 
@@ -208,13 +211,13 @@ Long-Term 原有 `runs/longterm/best.pt` 可直接交给新评估器。若恢复
   --checkpoint runs/longterm/best.pt --device cuda \
   --output runs/eval_longterm
 
-# 训练 NR 后用完全相同的验证扫描与评分器评估
+# 训练其他方法后用完全相同的验证扫描与评分器评估
 /data/qty/anaconda3/bin/python evaluate.py \
   --checkpoint runs/nr_rec_fus/best.pt --device cuda \
   --output runs/eval_nr_rec_fus
 ```
 
-默认评估全部 72 段验证扫描和原始 480×640 的全部像素；标志点按官方坐标直接读取。模型只接收图像，评分阶段才读取位姿。两个方法使用相同的窗口拼接规则：步长为输入帧数减一，以已经放置的窗口首帧为锚点，保留已有重叠帧，补齐尾窗口；短于输入长度的扫描重复末帧填充。Long-Term 选择每个窗口的 `(0,j)` 长距离预测，NR 选择同样的首帧相对预测。
+默认评估全部 72 段验证扫描和原始 480×640 的全部像素；标志点按官方坐标直接读取。模型只接收图像，评分阶段才读取位姿。Long-Term、NR 和 MoGLo 使用相同的窗口拼接规则：步长为输入帧数减一，以已经放置的窗口首帧为锚点，保留已有重叠帧，补齐尾窗口；短于输入长度的扫描重复末帧填充。Long-Term 选择每个窗口的 `(0,j)` 长距离预测，NR 选择同样的首帧相对预测。RecON 直接处理整段相邻帧序列，并在每段扫描上从相同权重重新在线优化。
 
 输出包括：
 
@@ -260,7 +263,7 @@ MoGLo-Net（Lee et al., IEEE TMI 2025）公开实现使用共享图像编码器�
   --config baselines/moglo_net/configs/tus_rec2024.json --device cuda
 ```
 
-默认输出 `runs/moglo_net/{best.pt,last.pt,history.json,steps.jsonl,loss_curves.png,loss_curves.svg}`；最佳模型按固定的三个验证窗口选择。整段扫描评估与两个已有基线使用同一评分器：
+默认输出 `runs/moglo_net/{best.pt,last.pt,history.json,steps.jsonl,loss_curves.png,loss_curves.svg}`；最佳模型按固定的三个验证窗口选择。整段扫描评估与其他已有基线使用同一评分器：
 
 ```bash
 /data/qty/anaconda3/bin/python evaluate.py \
@@ -274,6 +277,54 @@ MoGLo-Net（Lee et al., IEEE TMI 2025）公开实现使用共享图像编码器�
 /data/qty/anaconda3/bin/python scripts/run_moglo_experiment.py \
   --output runs/experiments/moglo_20260920_gpu0 --gpu 0
 ```
+
+## RecON 复现
+
+RecON（Luo et al., Medical Image Analysis 2023）采用离线监督骨干、三维形状判别器和逐扫描在线学习。相邻帧、边缘及光流组成6通道输入，ResNet-18与ConvLSTM预测相邻6-DoF运动；测试时结合PSC、GAS和FCC在当前无标签扫描上默认优化30轮。本适配的详细结构、训练命令和与作者协议的差异见 [RecON说明](baselines/recon/README.md)。
+
+训练保持作者公开配置的两阶段预算：骨干200 epoch、判别器50 epoch。最终判别器检查点内嵌仅来自000–049训练受试者的PSC回放库，在线推理不读取当前扫描位姿：
+
+```bash
+/data/qty/anaconda3/bin/python -m baselines.recon.train \
+  --stage backbone --device cuda
+
+/data/qty/anaconda3/bin/python -m baselines.recon.train \
+  --stage discriminator --backbone-checkpoint runs/recon_backbone/best.pt \
+  --device cuda
+
+/data/qty/anaconda3/bin/python evaluate.py \
+  --checkpoint runs/recon/best.pt --method recon --device cuda \
+  --output runs/eval_recon
+
+/data/qty/anaconda3/bin/python scripts/run_recon_experiment.py \
+  --output runs/experiments/recon_full --gpu 0
+```
+
+本适配使用TUS-REC2024受试者划分、120×160输入、CPU Farnebäck光流和固定网格可微体重建，与论文的三个原始数据集、CUDA光流和动态体重建不同，不能作为论文表格数值复现。`--online-epochs 0` 仅用于流程检查／消融；正式RecON结果必须使用配置中的30轮在线更新。
+
+## DC²-Net 复现
+
+DC²-Net（Guo et al., IEEE TBME 2023）使用五帧视频段、3D ResNeXt-50、末级注意力图，以及MSE／case-wise Pearson相关／margin-ranking三项损失。论文未链接源码，公开资源检索也未发现作者仓库，因此这里是依据开放全文完成的独立实现，不声称源码级复刻。论文结构、公式、超参数、推理聚合方式及TUS适配差异见 [DC²-Net说明](baselines/dc2_net/README.md)。
+
+```bash
+/data/qty/anaconda3/bin/python scripts/run_dc2_experiment.py \
+  --output runs/experiments/dc2_full_gpu1 --gpu 1
+```
+
+正式脚本训练100 epoch并在同一物理GPU上评估全部72段验证扫描；默认GPU为1。检查点只以图像和标定执行推理，真实位姿仅在随后评分阶段打开。
+
+## 2-Frame CNN（Prevost et al. 2018）复现
+
+该经典基线将两张相邻灰度帧堆叠为双通道 `128×128` 输入，经过四层卷积和两层全连接直接回归相邻帧的6-DoF。这里使用 DualTrack 第三方复现中单独提供的论文风格浅层 `Prevost2018ConvNet`，不使用其示例命令中的 EfficientNet-B1 替代网络。完整来源边界、增强后的物理标签变换和训练预算见 [2-Frame CNN说明](baselines/two_frame_cnn/README.md)。
+
+```bash
+/data/qty/anaconda3/bin/python scripts/preprocess_two_frame_cnn.py --device cuda
+
+/data/qty/anaconda3/bin/python scripts/run_two_frame_cnn_experiment.py \
+  --output runs/experiments/two_frame_cnn_full_gpu0 --gpu 0
+```
+
+正式配置等价训练6700个逐扫描epoch：每轮从每段训练扫描确定性随机采一个帧对，每100轮在72段验证扫描的固定帧对上选模。实现上将100轮严格按原随机种子和跨扫描批次顺序打包为一个存储epoch，因此配置显示67轮，但总计仍为8,040,000个训练帧对和502,500次Adam更新。最终逐一预测并累积整段扫描的所有相邻变换，再以相同评分器评价完整72段的GPE、GLE、LPE和LLE。该实现不是原作者源码复刻，结果也不能与论文私有800段数据上的漂移指标直接比较。
 
 ### 双 GPU 实验与原始记录
 

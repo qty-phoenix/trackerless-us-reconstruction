@@ -59,8 +59,9 @@ def plot_history(history, output, title='Training history'):
     for axis, (name, label) in zip(axes, names):
         for split, color in (('train', 'tab:blue'), ('val', 'tab:orange')):
             key = f'{split}_{name}'
-            if key in history[0]:
-                axis.plot(epochs, [row[key] for row in history], label=split, color=color, linewidth=1.5)
+            if any(key in row for row in history):
+                values = [row.get(key, np.nan) for row in history]
+                axis.plot(epochs, values, label=split, color=color, linewidth=1.5)
         axis.set_ylabel(label)
         axis.grid(alpha=.25)
         if axis.lines:
@@ -79,7 +80,18 @@ def plot_history(history, output, title='Training history'):
 def run_training(model, train, val, loss_fn, config, device, output, epochs,
                  batch_size, lr, workers=0, resume='', max_steps=0, val_steps=0,
                  weight_decay=0.):
-    if epochs < 1 or batch_size < 1 or min(max_steps, val_steps, workers) < 0:
+    validate_every = int(config.get('validate_every', 1))
+    plot_every = int(config.get('plot_every', 1))
+    val_batch_size = int(config.get('val_batch_size', 1))
+    effective_batch_size = int(config.get('effective_batch_size') or batch_size)
+    if effective_batch_size < batch_size or effective_batch_size % batch_size:
+        raise ValueError('effective_batch_size must be a positive multiple of batch_size')
+    accumulation_steps = effective_batch_size // batch_size
+    grad_clip = config.get('grad_clip')
+    if (epochs < 1 or batch_size < 1 or val_batch_size < 1 or
+            validate_every < 1 or plot_every < 1 or
+            min(max_steps, val_steps, workers) < 0 or
+            (grad_clip is not None and grad_clip <= 0)):
         raise ValueError('Invalid training limits')
     train_subjects = {r['subject'] for r in train.rows}
     val_subjects = {r['subject'] for r in val.rows}
@@ -90,19 +102,42 @@ def run_training(model, train, val, loss_fn, config, device, output, epochs,
         raise FileExistsError(f'{output} has a previous run; use --resume or a new --output')
     output.mkdir(parents=True, exist_ok=True)
     config = {**config, 'max_steps': max_steps, 'val_steps': val_steps, 'batch_size': batch_size}
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer_name = config.get('optimizer', 'adamw').lower()
+    if optimizer_name == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    else:
+        raise ValueError(f'Unsupported optimizer: {optimizer_name}')
+    scheduler = None
+    if config.get('lr_step_size') is not None:
+        if config['lr_step_size'] < 1 or not 0 < config.get('lr_gamma', 0) <= 1:
+            raise ValueError('Require lr_step_size >= 1 and 0 < lr_gamma <= 1')
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=config['lr_step_size'], gamma=config['lr_gamma'])
     start, best, history = 0, float('inf'), []
     if resume:
         checkpoint = torch.load(resume, map_location=device, weights_only=False)
         old = checkpoint.get('config', checkpoint.get('args', {}))
-        for key in ('method', 'num_samples', 'sample_range', 'height', 'width', 'model',
+        for key in ('method', 'stage', 'num_samples', 'sample_range', 'height', 'width', 'model',
                     'volume_shape', 'deform_channels', 'max_displacement_mm', 'margin_mm',
                     'reg_loss_weight', 'smooth_weight', 'refined_loss_weight', 'val_windows', 'seed',
-                    'max_steps', 'val_steps', 'batch_size', 'weight_decay', 'motion_scale'):
+                    'max_steps', 'val_steps', 'batch_size', 'weight_decay', 'motion_scale',
+                    'lr_step_size', 'lr_gamma', 'case_windows', 'margin', 'mse_weight',
+                    'correlation_weight', 'ranking_weight', 'model_layers', 'groups',
+                    'base_width', 'optimizer', 'validate_every', 'plot_every',
+                    'val_batch_size', 'grad_clip', 'dropout', 'flip_h_prob',
+                    'reverse_sweep_prob', 'skip_frame_prob', 'frame_cache',
+                    'pairs_per_scan', 'equivalent_scanwise_epochs', 'train_shuffle',
+                    'initialization', 'effective_batch_size'):
             if key in old and key in config and old[key] != config[key]:
                 raise ValueError(f'Resume configuration mismatch: {key}')
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
+        if scheduler is not None:
+            if 'scheduler' not in checkpoint:
+                raise ValueError('Scheduled training resume requires scheduler state')
+            scheduler.load_state_dict(checkpoint['scheduler'])
         start = checkpoint['epoch'] + 1
         history = checkpoint.get('history', [])
         # Old Long-Term checkpoint selection used random validation windows. Reset
@@ -117,9 +152,12 @@ def run_training(model, train, val, loss_fn, config, device, output, epochs,
         print(f'Resuming at epoch {start}', flush=True)
     if start >= epochs:
         raise ValueError('--epochs is the total target epoch count; checkpoint already reached it')
+    selection_metric = config.get('selection_metric', 'val_distance_mm')
     config = {**config, 'max_steps': max_steps, 'val_steps': val_steps,
-              'debug_run': bool(max_steps or val_steps), 'selection_metric': 'val_distance_mm',
+              'debug_run': bool(max_steps or val_steps), 'selection_metric': selection_metric,
               'validation_protocol': 'fixed_windows_v2', 'epochs': epochs, 'batch_size': batch_size,
+              'effective_batch_size': effective_batch_size,
+              'gradient_accumulation_steps': accumulation_steps,
               'lr': optimizer.param_groups[0]['lr'], 'resume': str(resume)}
     (output / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
     attempt_id = datetime.now(timezone.utc).isoformat()
@@ -129,23 +167,38 @@ def run_training(model, train, val, loss_fn, config, device, output, epochs,
             epoch_started = time.perf_counter()
             train.set_epoch(epoch)
             row = {'epoch': epoch}
-            for split, dataset, cap in (('train', train, max_steps), ('val', val, val_steps)):
+            run_validation = ((epoch + 1) % validate_every == 0 or epoch + 1 == epochs)
+            phases = [('train', train, max_steps)]
+            if run_validation:
+                phases.append(('val', val, val_steps))
+            for split, dataset, cap in phases:
                 model.train(split == 'train')
                 generator = torch.Generator().manual_seed(config['seed'] + epoch)
-                loader = DataLoader(dataset, batch_size=batch_size if split == 'train' else 1,
-                                    shuffle=split == 'train', num_workers=workers, generator=generator)
+                shuffle = split == 'train' and config.get('train_shuffle', True)
+                loader = DataLoader(dataset, batch_size=(batch_size if split == 'train'
+                                                         else val_batch_size),
+                                    shuffle=shuffle, num_workers=workers, generator=generator)
                 sums, count = {}, 0
+                phase_steps = min(len(loader), cap) if cap else len(loader)
+                if split == 'train' and phase_steps % accumulation_steps:
+                    raise ValueError('Training micro-batches must be divisible by gradient accumulation steps')
+                optimizer_steps = 0
+                if split == 'train':
+                    optimizer.zero_grad(set_to_none=True)
                 with torch.set_grad_enabled(split == 'train'):
                     for step, batch in enumerate(loader):
                         step_started = time.perf_counter()
-                        if split == 'train':
-                            optimizer.zero_grad(set_to_none=True)
                         loss, metrics = loss_fn(model, batch)
                         if not torch.isfinite(loss):
                             raise FloatingPointError(f'Non-finite {split} loss at epoch {epoch}, step {step}')
                         if split == 'train':
-                            loss.backward()
-                            optimizer.step()
+                            (loss / accumulation_steps).backward()
+                            if (step + 1) % accumulation_steps == 0:
+                                if grad_clip is not None:
+                                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                                optimizer.step()
+                                optimizer.zero_grad(set_to_none=True)
+                                optimizer_steps += 1
                         n = len(batch['frames'])
                         scalars = {}
                         for key, value in {'loss': loss, **metrics}.items():
@@ -159,6 +212,9 @@ def run_training(model, train, val, loss_fn, config, device, output, epochs,
                                'scan_ids': batch.get('scan_id', []), 'metrics': scalars,
                                'lr': optimizer.param_groups[0]['lr'],
                                'step_seconds': time.perf_counter() - step_started}
+                        if split == 'train':
+                            raw.update(accumulation_steps=accumulation_steps,
+                                       optimizer_step=optimizer_steps)
                         if 'indices' in batch:
                             raw['frame_indices'] = batch['indices'].tolist()
                         raw_log.write(json.dumps(raw) + '\n')
@@ -171,19 +227,31 @@ def run_training(model, train, val, loss_fn, config, device, output, epochs,
                     raise ValueError(f'{split} dataset is empty')
                 row.update({f'{split}_{k}': v / count for k, v in sums.items()})
                 row[f'{split}_windows'] = count
-            improved = row['val_distance_mm'] < best
-            best = min(best, row['val_distance_mm'])
+                if split == 'train':
+                    row['optimizer_steps'] = optimizer_steps
+            row['lr'] = optimizer.param_groups[0]['lr']
+            improved = False
+            if run_validation:
+                if selection_metric not in row:
+                    raise KeyError(f'Selection metric {selection_metric} was not produced')
+                improved = row[selection_metric] < best
+                best = min(best, row[selection_metric])
             history.append(row)
+            if scheduler is not None:
+                scheduler.step()
             checkpoint = {'version': 2, 'method': config['method'], 'model': model.state_dict(),
                           'optimizer': optimizer.state_dict(), 'config': config, 'epoch': epoch,
                           'best': best, 'history': history, 'rng': rng_state()}
+            if scheduler is not None:
+                checkpoint['scheduler'] = scheduler.state_dict()
             atomic_save(checkpoint, output / 'last.pt')
             if improved:
                 atomic_save(checkpoint, output / 'best.pt')
             temporary = output / 'history.json.tmp'
             temporary.write_text(json.dumps(history, indent=2) + '\n')
             temporary.replace(output / 'history.json')
-            plot_history(history, output, f"{config['method']} training history")
+            if (epoch + 1) % plot_every == 0 or epoch + 1 == epochs:
+                plot_history(history, output, f"{config['method']} training history")
             print(json.dumps(row), flush=True)
             raw_log.write(json.dumps({'attempt_id': attempt_id, 'epoch': epoch, 'event': 'epoch_complete',
                                       'seconds': time.perf_counter() - epoch_started}) + '\n')

@@ -31,7 +31,7 @@ def main():
     done = threading.Event()
     monitor = None
     try:
-        snapshot(out)
+        snapshot(out, min_gpus=1)
         config = json.loads((REPO / args.config).read_text())
         config['output'] = str(folder / 'training')
         config_path = folder / 'train_config.json'

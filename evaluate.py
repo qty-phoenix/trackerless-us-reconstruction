@@ -14,9 +14,12 @@ from inference import Predictor, export_ddfs
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--checkpoint', required=True)
-    p.add_argument('--method', choices=('longterm', 'nr_rec_fus', 'moglo_net'))
+    p.add_argument('--method', choices=('longterm', 'nr_rec_fus', 'moglo_net', 'recon',
+                                        'dc2_net', 'two_frame_cnn'))
     p.add_argument('--root', default='data/tus-rec2024')
     p.add_argument('--split', choices=('train', 'val'), default='val')
+    p.add_argument('--manifest', default='',
+                   help='Explicit JSONL manifest; overrides --split and permits benchmark holdouts')
     p.add_argument('--device', default='cuda')
     p.add_argument('--metric-device', default=None, help='Defaults to --device; use cpu for CPU scoring')
     p.add_argument('--output', required=True)
@@ -24,6 +27,8 @@ def main():
     p.add_argument('--chunk-size', type=int, default=16384)
     p.add_argument('--cpu-threads', type=int, default=4)
     p.add_argument('--rigid-only', action='store_true', help='NR rigid-branch ablation')
+    p.add_argument('--online-epochs', type=int, default=None,
+                   help='RecON debug/ablation override; formal protocol uses checkpoint value 30')
     p.add_argument('--export-ddfs', action='store_true', help='Write full-resolution GP/GL/LP/LL per scan')
     a = p.parse_args()
     if a.max_scans < 0 or a.chunk_size < 1 or a.cpu_threads < 1:
@@ -32,12 +37,13 @@ def main():
     root, output = Path(a.root), Path(a.output)
     if (output / 'metrics.json').exists() or (output / 'per_scan.jsonl').exists():
         raise FileExistsError(f'{output} already has evaluation results; use a new --output')
-    rows = [json.loads(line) for line in (root / 'manifests' / f'{a.split}.jsonl').read_text().splitlines() if line.strip()]
-    expected = 72 if a.split == 'val' else 1200
-    if len(rows) != expected:
-        raise ValueError(f'Incomplete {a.split} manifest: {len(rows)}/{expected}')
+    manifest = Path(a.manifest) if a.manifest else root / 'manifests' / f'{a.split}.jsonl'
+    rows = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
+    expected = len(rows) if a.manifest else (72 if a.split == 'val' else 1200)
+    if not rows or len(rows) != expected:
+        raise ValueError(f'Incomplete manifest {manifest}: {len(rows)}/{expected}')
     selected = rows[:a.max_scans] if a.max_scans else rows
-    predictor = Predictor(a.checkpoint, a.device, a.method, a.rigid_only)
+    predictor = Predictor(a.checkpoint, a.device, a.method, a.rigid_only, a.online_epochs)
     output.mkdir(parents=True, exist_ok=True)
     results = []
     for row in selected:
@@ -78,12 +84,20 @@ def main():
         if a.export_ddfs:
             export_ddfs(prediction, landmarks, scan_dir)
     summary = {'method': predictor.method, 'checkpoint': str(Path(a.checkpoint).resolve()),
-               'checkpoint_config': predictor.config, 'split': a.split, 'scan_count': len(results),
+               'checkpoint_config': predictor.config,
+               'split': manifest.stem if a.manifest else a.split,
+               'manifest': str(manifest.resolve()), 'scan_count': len(results),
                'partial': len(results) != len(rows), 'rigid_only': a.rigid_only,
                'metric_device': metric_device, 'chunk_size': a.chunk_size,
                'units': 'mm', 'aggregation': 'unweighted mean over scans',
                'pixel_coordinates': 'official x=1..640, y=1..480, x-fastest',
-               'stitching': 'stride K-1; anchor window first; retain overlap; include tail',
+               'stitching': ('full-sequence adjacent transforms with per-scan online adaptation'
+                             if predictor.method == 'recon' else
+                             'all overlapping windows; average mean-motion estimates on covered edges'
+                             if predictor.method == 'dc2_net' else
+                             'all adjacent frame pairs; compose predicted image transforms'
+                             if predictor.method == 'two_frame_cnn' else
+                             'stride K-1; anchor window first; retain overlap; include tail'),
                'nr_local_definition': 'difference of anchored refined global positions in previous rigid image basis',
                'mean': {k: float(np.mean([r[k] for r in results])) for k in ('GPE', 'GLE', 'LPE', 'LLE', 'inference_seconds')},
                'std': {k: float(np.std([r[k] for r in results])) for k in ('GPE', 'GLE', 'LPE', 'LLE')}}
